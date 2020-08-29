@@ -1,5 +1,5 @@
 # =====================================================================
-# SCRIPT NAME: copy-file.ps1
+# SCRIPT NAME: copy_file.ps1
 # PURPOSE: copy a file to a list of targets
 #
 # REVISION HISTORY:
@@ -8,3 +8,8 @@
 # Charlie Rogers	08/29/2020	00.00.01	Initial creation
 #
 # =====================================================================
+
+$sNAME = "copy_file.ps1"
+$sVER = "00.00.01"
+$sDATE = "08/29/2020"
+
