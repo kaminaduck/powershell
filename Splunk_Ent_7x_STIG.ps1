@@ -41,13 +41,20 @@ Import-Module PSLogging
 
 #----------------------------------------------------------[Declarations]----------------------------------------------------------
 
-#Script Version
+# Script Version
 $sScriptVersion = "00.00.01"
 
-#Log File Info
+# File Info
 $sLogPath = "C:\Script_Outputs"
 $sLogName = "Splunk_Ent_7x_STIG.log"
 $sLogFile = Join-Path -Path $sLogPath -ChildPath $sLogName
+$sOutputTxtName = "Splunk_Ent_7x_STIG.txt"
+$sOutputTxtFile = Join-Path -Path $sLogPath -ChildPath $sOutputTxtName
+$sOutputCSVName = "Splunk_Ent_7x_STIG.csv"
+$sOutputCSVFile = Join-Path -Path $sLogPath -ChildPath $sOutputCSVName
+
+# Script Info
+$MyHashValue = $($(Get-FileHash $PSCommandPath -Algorithm SHA256).Hash)
 
 # -----------------
 # OS variables
@@ -99,10 +106,10 @@ $Outputs_Conf = "$Ent_Path\etc\system\local\outputsconf"
 $LDAP_Conf = "$Ent_Path\etc\openldap\ldap.conf"
 $UF_BIN_Path = $null
 $UF_Output_Path = $null
-$UF_Web_conf = $null
+$UF_Web_conf = $null    # This variable is in case your server has a Universal Forwarder installed; the default install directory is different for UFs than Enterprise.
 $Cluster_Index_conf = $null
-$Cluster_Web_Conf = $null
-$SH_Web_conf = $null
+$Cluster_Web_Conf = $null   # This variable is in case your environment's indexers are clustered, which should be in /etc/peer-apps/ somewhere
+$SH_Web_conf = $null    # This variable is in case your environment's saved the Search Head web.conf file in a location other than /etc/system/local/
 
 # -----------------
 # V-221933 values to check
@@ -139,9 +146,10 @@ $ServerRole = $null
 # -----------------
 # Variables for STIG findings report
 # -----------------
-[int]$CAT1_PASS=0; [int]$CAT1_OPEN=0; [int]$CAT1_NA=0; [int]$CAT1_NR=0 
-[int]$CAT2_PASS=0; [int]$CAT2_OPEN=0; [int]$CAT2_NA=0; [int]$CAT2_NR=0 
-[int]$CAT3_PASS=0; [int]$CAT3_OPEN=0; [int]$CAT3_NA=0; [int]$CAT3_NR=0 
+[int]$CAT1_TOTAL=0;[int]$CAT1_PASS=0; [int]$CAT1_OPEN=0; [int]$CAT1_NA=0; [int]$CAT1_NR=0 
+[int]$CAT2_TOTAL=0;[int]$CAT2_PASS=0; [int]$CAT2_OPEN=0; [int]$CAT2_NA=0; [int]$CAT2_NR=0 
+[int]$CAT3_TOTAL=0;[int]$CAT3_PASS=0; [int]$CAT3_OPEN=0; [int]$CAT3_NA=0; [int]$CAT3_NR=0 
+$STIG_Title = $null
 $STIG_CCI = $null     
 $STIG_Response = $null 
 $STIG_Rule_ID = $null     
@@ -149,12 +157,13 @@ $STIG_Severity = $null     # Values: (I, II, or III)
 $STIG_ID = $null     
 $STIG_Check_Status = $null   # Values: (OPEN, PASS, NA, NR)
 $NIST_CM = $null    # NIST SP 800-53r4 CM category.
-[int]$STIG_Count = 0     
 $STIG_Vuln_ID = $null      
+[int]$STIG_Count = 0 
 [int]$STIG_Count_NA = 0 
 [int]$STIG_Count_NR = 0     
 [int]$STIG_Count_OPEN = 0     
-[int]$STIG_Count_PASS = 0   
+[int]$STIG_Count_PASS = 0
+
 
 
 #-----------------------------------------------------------[Functions]------------------------------------------------------------
@@ -219,9 +228,293 @@ If it does not, the function creates the directory.
     }
 }
 
+Function CheckForApache {
+<#
+This function will have nested try/catch statements because I'm trying to allow for any eventuality of Apache installation.
+I'm sure there's a better way to handle it, but I'm not sure of one yet.
+Also I'm not sure if this function works yet.
+#>
+    Begin {
+        Write-LogInfo -LogPath $sLogFile -Message "`nChecking status of Apache installation"
+        $ServiceName = Read-Host -Prompt "`nPlease input the name of the Apache HTTPD service installed: "
+    }
+    
+    Process {
+        Try {
+            Try { 
+                $ApacheStart = (Get-Service $ServiceName).StartType 
+            } 
+            catch { 
+                $ApacheExists="NO" 
+            } 
+            Try { 
+                $ApacheStartName = (Get-WmiObject Win32_Service -Filter "Name='$ServiceName'").StartName 
+            } 
+            catch { 
+                $ApacheStartName = $null 
+            }
+            Try { 
+                $ApacheStatus = (Get-Service $ServiceName).Status 
+            } 
+            catch {
+                $ApacheStatus = "NA" 
+            } 
+            switch ($ApacheStart) { # Acceptable values of the start type for the service to exist
+                "Automatic" { $ApacheExists="YES" }
+                "Manual" { $ApacheExists="YES" }
+                "Disabled" { $ApacheExists="YES" }
+            }
+        }
+    
+        Catch {
+          Write-LogError -LogPath $sLogFile -Message $_.Exception -ExitGracefully
+          Break
+        }
+    }
+    
+    End {
+        If ($?) {
+          Write-LogInfo -LogPath $sLogFile -Message "`nApache existence check completed successfully."
+        }
+    }
+}
+
+Function CheckServerRole {
+<#
+This function checks to see if the Splunk installation is a search head, an indexer, or a universal forwarder.
+This is based on the assumption that Splunk is installed in the first place.
+#>
+    Begin {
+        Write-LogInfo -LogPath $sLogFile -Message "`nChecking Splunk Enterprise server role..."
+        CheckForApache
+    }
+    
+    Process {
+        Try {
+            if ( $ApacheExists -eq "YES" ) {
+                $ServerRole = "WEB"
+            }
+            else {
+                if ( Test-Path $Cluster_Index_conf ) {
+                    $ServerRole = "INDEXER"
+                }
+                else {
+                    $ServerRole = "FORWARDER"
+                }
+            }
+        }
+    
+        Catch {
+          Write-LogError -LogPath $sLogFile -Message $_.Exception -ExitGracefully
+          Break
+        }
+    }
+
+    End {
+        If ($?) {
+          Write-LogInfo -LogPath $sLogFile -Message "`nSplunk Enterprise server role check completed successfully."
+        }
+    }
+}
+
+Function CheckForWeb {
+<#
+This function checks to see if the Splunk installation has a web interface enabled, based upon its installation.
+Search heads should have a web interface, while indexers and universal forwarders should not.
+#>
+    Begin {
+        Write-LogInfo -LogPath $sLogFile -Message "`nChecking Splunk Enterprise web interface status..."
+        CheckServerRole
+        # temporary string placeholders
+        [string]$data = $null
+        [string]$data1 = $null
+        $data = Get-Content $Web_conf | Select-String -NotMatch "#" | Select-String -Pattern startwebserver
+    }
+
+    Process {
+        Try {
+            if ( $ServerRole -eq "WEB" ) {
+                $data1 = Get-Content $SH_Web_conf | Select-String -NotMatch "#" | Select-String -Pattern startwebserver
+                if ( ($data -eq "startwebserver = 1") -or ($data1 -eq "startwebserver = 1" ) ) { 
+                    $WebExists = "YES" 
+                }
+                elseif ( ($data -eq "startwebserver = 0") -or ($data1 -eq "startwebserver = 0") ) {
+                    $WebExists = "NO"
+                }
+                else {
+                    $WebExists = "UNKNOWN"
+                }
+            }
+            elseif ( $ServerRole -eq "INDEXER" ) {
+                $data1 = Get-Content $Cluster_Web_Conf | Select-String -NotMatch "#" | Select-String -Pattern startwebserver
+                if ( ($data -eq "startwebserver = 1") -or ($data1 -eq "startwebserver = 1" ) ) { 
+                    $WebExists = "YES" 
+                }
+                elseif ( ($data -eq "startwebserver = 0") -or ($data1 -eq "startwebserver = 0") ) {
+                    $WebExists = "NO"
+                }
+                else {
+                    $WebExists = "UNKNOWN"
+                }
+            }
+            elseif ( $ServerRole -eq "FORWARDER" ) {
+                $data1 = Get-Content $UF_Web_conf | Select-String -NotMatch "#" | Select-String -Pattern startwebserver
+                if ( ($data -eq "startwebserver = 1") -or ($data1 -eq "startwebserver = 1" ) ) { 
+                    $WebExists = "YES" 
+                }
+                elseif ( ($data -eq "startwebserver = 0") -or ($data1 -eq "startwebserver = 0") ) {
+                    $WebExists = "NO"
+                }
+                else {
+                    $WebExists = "UNKNOWN"
+                }
+            }
+            else {
+                $WebExists = "ERROR"
+            }
+        }
+    
+        Catch {
+          Write-LogError -LogPath $sLogFile -Message $_.Exception -ExitGracefully
+          Break
+        }
+    }
+    
+    End {
+        If ($?) {
+          Write-LogInfo -LogPath $sLogFile -Message "`nSplunk Enterprise web interface check completed successfully."
+        }
+    }
+}
+
+Function ScriptFilesList {
+    Write-Output "`nScript Hash: $MyHashValue"
+
+}
+
+# =============================================================================== 
+# Function to update output file
+# =============================================================================== 
+Function UpdateReport {
+    
+    Begin {
+        Write-LogInfo -LogPath $sLogFile -Message "`nUpdating STIG report..."
+        Add-Content -Path $sOutputCSVFile -Value "$Computer,$nwIPv4,$nwMACADD,V-$STIG_Vuln_ID,$STIG_Check_Status,$STIG_Severity,SV-$STIG_Rule_ID,$STIG_ID,$NIST_CM,$STIG_CCI,$STIG_Title"
+    }
+    
+    Process {
+        Try {
+            $STIG_Count++
+            switch ($STIG_Check_Status) {
+                "OPEN" { $STIG_Count_OPEN++ }
+                "NA" { $STIG_Count_NA++ }
+                "NR" { $STIG_Count_NR++ }
+                default { $STIG_Count_PASS++ }
+            }
+            switch ($STIG_Severity) {
+                "I" { switch ($STIG_Check_Status) {
+                        "OPEN" { $CAT1_TOTAL++; $CAT1_OPEN++ }
+                        "NA" { $CAT1_TOTAL++; $CAT1_NA++ }
+                        "NR" { $CAT1_TOTAL++; $CAT1_NR++ }
+                        default { $CAT1_TOTAL++; $CAT1_PASS++}
+                    }; break
+                }
+                "II" { switch ($STIG_Check_Status) {
+                        "OPEN" { $CAT2_TOTAL++; $CAT2_OPEN++ }
+                        "NA" { $CAT2_TOTAL++; $CAT2_NA++ }
+                        "NR" { $CAT2_TOTAL++; $CAT2_NR++ }
+                        default { $CAT2_TOTAL++; $CAT2_PASS++}
+                    }; break
+                }
+                "III" { switch ($STIG_Check_Status) {
+                        "OPEN" { $CAT3_TOTAL++; $CAT3_OPEN++ }
+                        "NA" { $CAT3_TOTAL++; $CAT3_NA++ }
+                        "NR" { $CAT3_TOTAL++; $CAT3_NR++ }
+                        default { $CAT3_TOTAL++; $CAT3_PASS++}
+                    }; break
+                }
+            }     
+        }
+    
+        Catch {
+          Write-LogError -LogPath $sLogFile -Message $_.Exception -ExitGracefully
+          Break
+        }
+    }
+
+    End {
+        If ($?) {
+          Write-LogInfo -LogPath $sLogFile -Message "`nSTIG Report Updated Successfully."
+        }
+    }
+
+
+}
+
+Function FLines { 
+    Param (
+        [Parameter(Mandatory=$true,Position=0)][string]$Location,
+        [Parameter(Mandatory=$false,Position=1)][int]$NumLines
+    )
+
+    Begin {
+        Write-LogInfo -LogPath $sLogFile -Message "`nPrinting lines..."
+    }
+
+    Process {
+        Try {
+            switch ($Location) {
+                $sLogFile {
+                    switch ($NumLines) { 
+                        0 { Add-Content -Path $sLogFile -Value " " } 
+                        1 { Add-Content -Path $sLogFile -Value "`n$LineSingle" } 
+                        2 { Add-Content -Path $sLogFile -Value "`n$LineDouble" } 
+                        3 { Add-Content -Path $sLogFile -Value "`n$lineStars" } 
+                        4 { Add-Content -Path $sLogFile -Value "`n$LineSingle`n$LineDouble`n$lineStars" }
+                        default { Add-Content -Path $sLogFile -Value "`n$LineDouble" } 
+                    }         
+                }
+                $sOutputTxtFile {
+                    switch ($NumLines) { 
+                        0 { Add-Content -Path $sOutputTxtFile -Value " " } 
+                        1 { Add-Content -Path $sOutputTxtFile -Value "`n$LineSingle" } 
+                        2 { Add-Content -Path $sOutputTxtFile -Value "`n$LineDouble" } 
+                        3 { Add-Content -Path $sOutputTxtFile -Value "`n$lineStars" } 
+                        4 { Add-Content -Path $sOutputTxtFile -Value "`n$LineSingle`n$LineDouble`n$lineStars" }
+                        default { Add-Content -Path $sOutputTxtFile -Value "`n$LineDouble" } 
+                    }         
+                }
+                $sOutputCSVFile {
+                    switch ($NumLines) { 
+                        0 { Add-Content -Path $sOutputCSVFile -Value " " } 
+                        1 { Add-Content -Path $sOutputCSVFile -Value "`n$LineSingle" } 
+                        2 { Add-Content -Path $sOutputCSVFile -Value "`n$LineDouble" } 
+                        3 { Add-Content -Path $sOutputCSVFile -Value "`n$lineStars" } 
+                        4 { Add-Content -Path $sOutputCSVFile -Value "`n$LineSingle`n$LineDouble`n$lineStars" }
+                        default { Add-Content -Path $sOutputCSVFile -Value "`n$LineDouble" } 
+                    }         
+                }
+            }
+        }
+    
+        Catch {
+          Write-LogError -LogPath $sLogFile -Message $_.Exception -ExitGracefully
+          Break
+        }
+    }
+
+    End {
+        If ($?) {
+          Write-LogInfo -LogPath $sLogFile -Message "`nLines printed successfully."
+        }
+    }
+}
+
+
 
 #-----------------------------------------------------------[Execution]------------------------------------------------------------
 TestLogPath
+
 Start-Log -LogPath $sLogPath -LogName $sLogName -ScriptVersion $sScriptVersion
 #Script Execution goes here
 Stop-Log -LogPath $sLogFile
